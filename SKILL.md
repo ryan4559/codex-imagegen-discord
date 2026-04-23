@@ -5,6 +5,8 @@ description: "Generate an image via Codex CLI ($imagegen) using the host's exist
 
 # Codex imagegen → save → post to Discord
 
+> Source / updates: https://github.com/ryan4559/codex-imagegen-discord
+
 ## Requirements
 
 | Item | How to verify | Required? |
@@ -12,12 +14,14 @@ description: "Generate an image via Codex CLI ($imagegen) using the host's exist
 | **Python 3.10+** | `python3 --version` (script uses `list[str]` / `X \| None` syntax) | Yes |
 | **Codex CLI signed in** | Run `codex login` once; `~/.codex/auth.json` exists | Yes |
 | **`image_generation` feature** | `codex features list \| grep image_generation` reports `true` (stable default) | Yes |
-| **OpenClaw with Discord channel** | `openclaw message send --channel discord ...` succeeds | Yes |
-| **bubblewrap (`bwrap`)** | `which bwrap`; on Debian/Ubuntu: `sudo apt install bubblewrap` | Recommended — without it Codex falls back to a vendored binary and prints a warning, but still runs |
+| **OpenClaw Discord adapter configured** | Bot token set and you have a valid target ID (e.g. `channel:<id>`). Smoke test: `openclaw message send --channel discord --target <id> --message hi` succeeds | Yes |
+| **bubblewrap (`bwrap`)** — **Linux only** | `which bwrap`; on Debian/Ubuntu: `sudo apt install bubblewrap`. macOS uses Apple's `sandbox-exec` (seatbelt) instead and does not need this | Recommended on Linux — without it Codex falls back to a vendored binary and prints a warning, but still runs. N/A on macOS. |
+
+**Platform support**: developed and tested on Linux. macOS should work (paths are home-relative; Codex sandboxes via `sandbox-exec` instead of bwrap). **On Windows, use WSL2** — native Windows support for Codex CLI / OpenClaw is not validated here and the `#!/usr/bin/env python3` shebang is ignored outside a POSIX shell.
 
 **Working directory** (for `codex exec --cd`): defaults to `$OPENCLAW_WORKSPACE`, otherwise `~/.openclaw/workspace`. Override with `--cd`.
 
-**Note on bubblewrap**: Codex uses `bwrap` to sandbox shell commands the model issues at runtime. This skill only invokes `$imagegen` (no shell tool calls), so bubblewrap is initialized but effectively unused. If it's missing, Codex falls back to a vendored copy and prints a one-line warning — everything still works. Installing the system package just silences the warning and is good hygiene for other Codex workflows that *do* run commands.
+**Note on bubblewrap (Linux)**: Codex uses `bwrap` to sandbox shell commands the model issues at runtime. This skill only invokes `$imagegen` (no shell tool calls), so bubblewrap is initialized but effectively unused. If it's missing, Codex falls back to a vendored copy and prints a one-line warning — everything still works. Installing the system package just silences the warning and is good hygiene for other Codex workflows that *do* run commands. macOS users should skip this step entirely.
 
 > ⚠️ `$imagegen` turns consume your **ChatGPT plan** quota at roughly **3–5× the tokens of a normal turn**. To bill via API instead, set `OPENAI_API_KEY`.
 
