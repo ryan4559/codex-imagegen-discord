@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
 """Generate an image via Codex CLI ($imagegen) and upload it to Discord.
 
-Codex CLI's built-in image generation tool saves PNGs to
-  ~/.codex/generated_images/<session-id>/ig_*.png
+Codex CLI's built-in image generation tool saves images to
+  ~/.codex/generated_images/<session-id>/ig_*
 and references the path in the conversation. It does NOT return raw bytes in
 the final message. So this script:
   1. snapshots that directory before running codex,
   2. runs `codex exec "$imagegen ..."` (no --output-schema),
-  3. picks the newest PNG that appeared after start time,
-  4. uploads it to Discord via the selected transport.
+  3. picks the newest image that appeared after start time,
+  4. copies it to --out,
+  5. uploads it to Discord via the selected transport.
 
 Transports (pick with --transport, or auto-detect from env):
   - webhook    : POST to DISCORD_WEBHOOK_URL. Simplest; single channel only;
                  cannot read messages (so --use-latest-discord-image is off).
   - bot        : Use DISCORD_BOT_TOKEN against Discord REST API v10.
                  Supports all features; requires bot setup + invite.
-  - openclaw   : Shell out to `openclaw message send` (legacy path).
+  - openclaw   : Shell out to `openclaw message send`.
 
 An earlier revision used `--output-schema` to force Codex to return
 `{"png_base64": "..."}`. That fought the built-in imagegen tool (which writes
@@ -40,7 +41,8 @@ IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
 DISCORD_CDN_HOSTS = {"cdn.discordapp.com", "media.discordapp.net"}
 DISCORD_API = "https://discord.com/api/v10"
 CODEX_IMAGES_DIR = os.path.expanduser("~/.codex/generated_images")
-CODEX_EXEC_TIMEOUT = 600  # seconds; imagegen turns are slow, but not infinite
+OPENCLAW_IMAGES_DIR = os.path.expanduser("~/.openclaw/media/tool-image-generation")
+EXEC_TIMEOUT = 600  # seconds; imagegen turns are slow, but not infinite
 
 
 def run(cmd: list[str], timeout: int | None = None) -> subprocess.CompletedProcess:
@@ -57,6 +59,15 @@ def run(cmd: list[str], timeout: int | None = None) -> subprocess.CompletedProce
 def is_image_filename(name: str) -> bool:
     _, ext = os.path.splitext((name or "").lower())
     return ext in IMAGE_EXTS
+
+
+def image_content_type(path: str) -> str:
+    ext = os.path.splitext(path.lower())[1]
+    return {
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".webp": "image/webp",
+    }.get(ext, "image/png")
 
 
 def download_url_to_file(url: str, out_path: str) -> None:
@@ -211,28 +222,28 @@ def find_latest_image_url(transport: str, target: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# Filesystem helpers (Codex image extraction)
+# Filesystem helpers (image extraction from provider output dir)
 # ---------------------------------------------------------------------------
 
-def snapshot_png_paths(root: str) -> set[str]:
+def snapshot_image_paths(root: str) -> set[str]:
     if not os.path.isdir(root):
         return set()
     found: set[str] = set()
     for dirpath, _dirs, files in os.walk(root):
         for name in files:
-            if name.lower().endswith(".png"):
+            if is_image_filename(name):
                 found.add(os.path.join(dirpath, name))
     return found
 
 
-def newest_png_created_since(root: str, started_at: float, exclude: set[str]) -> str | None:
+def newest_image_created_since(root: str, started_at: float, exclude: set[str]) -> str | None:
     if not os.path.isdir(root):
         return None
     best_path: str | None = None
     best_mtime: float = -1.0
     for dirpath, _dirs, files in os.walk(root):
         for name in files:
-            if not name.lower().endswith(".png"):
+            if not is_image_filename(name):
                 continue
             p = os.path.join(dirpath, name)
             if p in exclude:
@@ -256,10 +267,11 @@ def newest_png_created_since(root: str, started_at: float, exclude: set[str]) ->
 def send_via_webhook(out_path: str, message: str) -> tuple[bool, str]:
     url = os.environ["DISCORD_WEBHOOK_URL"]
     payload = json.dumps({"content": message})
+    ctype = image_content_type(out_path)
     cp = run([
         "curl", "-sS", "--fail-with-body", "-X", "POST",
         "-F", f"payload_json={payload}",
-        "-F", f"files[0]=@{out_path};type=image/png",
+        "-F", f"files[0]=@{out_path};type={ctype}",
         url,
     ])
     if cp.returncode == 0:
@@ -274,11 +286,12 @@ def send_via_bot(out_path: str, target: str, message: str) -> tuple[bool, str]:
     except Exception as e:
         return False, str(e)
     payload = json.dumps({"content": message})
+    ctype = image_content_type(out_path)
     cp = run([
         "curl", "-sS", "--fail-with-body", "-X", "POST",
         "-H", f"Authorization: Bot {token}",
         "-F", f"payload_json={payload}",
-        "-F", f"files[0]=@{out_path};type=image/png",
+        "-F", f"files[0]=@{out_path};type={ctype}",
         f"{DISCORD_API}/channels/{channel_id}/messages",
     ])
     if cp.returncode == 0:
@@ -316,9 +329,9 @@ def send_media(out_path: str, message: str, transport: str, target: str | None) 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--prompt", required=True)
-    ap.add_argument("--out", required=True)
+    ap.add_argument("--out", required=True, help="Output image path. The calling agent decides this; for openclaw transport, point to ~/.openclaw/media/tool-image-generation/<name>.png.")
     ap.add_argument("--target", default=None, help='Discord target, e.g. channel:<id> or user:<id>. Required for bot / openclaw transports; ignored for webhook.')
-    ap.add_argument("--message", default="codex image")
+    ap.add_argument("--message", default="generated image")
     ap.add_argument("--size", default="1024x1024")
     ap.add_argument(
         "--transport",
@@ -379,14 +392,14 @@ def main() -> int:
             else "Generate a new image."
         )
 
-        codex_prompt = (
+        gen_prompt = (
             f"$imagegen\n"
             f"{mode_line}\n"
             f"Size: {args.size}.\n"
             f"Instruction: {args.prompt}\n"
         )
 
-        before = snapshot_png_paths(CODEX_IMAGES_DIR)
+        before = snapshot_image_paths(CODEX_IMAGES_DIR)
         started_at = time.time()
 
         cmd = [
@@ -398,12 +411,12 @@ def main() -> int:
             cmd.extend(["-i", p])
         # NOTE: with -i/--image attached, newer Codex CLI may treat the trailing
         # positional ambiguously unless we force end-of-options. Keep "--".
-        cmd.extend(["--", codex_prompt])
+        cmd.extend(["--", gen_prompt])
 
         try:
-            cp = run(cmd, timeout=CODEX_EXEC_TIMEOUT)
+            cp = run(cmd, timeout=EXEC_TIMEOUT)
         except subprocess.TimeoutExpired:
-            sys.stderr.write(f"codex exec exceeded {CODEX_EXEC_TIMEOUT}s; aborting.\n")
+            sys.stderr.write(f"codex exec exceeded {EXEC_TIMEOUT}s; aborting.\n")
             return 9
 
         if cp.returncode != 0:
@@ -412,19 +425,20 @@ def main() -> int:
             sys.stderr.write((cp.stdout or "")[-2000:] + "\n")
             return cp.returncode
 
-        new_png = newest_png_created_since(CODEX_IMAGES_DIR, started_at, before)
-        if not new_png:
+        new_img = newest_image_created_since(CODEX_IMAGES_DIR, started_at, before)
+        if not new_img:
             sys.stderr.write(
-                "codex exec finished but no new PNG appeared under "
+                "codex exec finished but no new image appeared under "
                 f"{CODEX_IMAGES_DIR}. Is image_generation enabled and the host signed in?\n"
             )
             sys.stderr.write("codex stdout (tail):\n" + (cp.stdout or "")[-2000:] + "\n")
             return 3
 
-        with open(new_png, "rb") as fsrc:
+        with open(new_img, "rb") as fsrc:
             img = fsrc.read()
-        if not img.startswith(b"\x89PNG\r\n\x1a\n"):
-            sys.stderr.write(f"File at {new_png} is not a PNG.\n")
+        # Minimal sanity check: reject obviously wrong files (e.g. empty or HTML error pages).
+        if len(img) < 64:
+            sys.stderr.write(f"File at {new_img} is suspiciously small ({len(img)} bytes).\n")
             return 5
         with open(out_path, "wb") as fdst:
             fdst.write(img)
@@ -441,7 +455,8 @@ def main() -> int:
                 sys.stderr.write(str(e) + "\n")
                 sys.stderr.write(err[-4000:] + "\n")
                 return 4
-            note = "(Discord PNG optimization failed; uploaded as a generic file. Rename back to .png after download to view.)"
+            ext = os.path.splitext(out_path)[1] or ".png"
+            note = f"(Discord image optimization failed; uploaded as a generic file. Rename back to {ext} after download to view.)"
             ok2, err2 = send_media(fallback_path, args.message + "\n" + note, transport, args.target)
             if not ok2:
                 sys.stderr.write("send failed (fallback .dat)\n")
