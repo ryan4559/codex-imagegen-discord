@@ -42,6 +42,12 @@ OUT=~/tmp/codex-img-$(date +%Y%m%d-%H%M%S).png
 ```bash
 python3 path/to/scripts/codex_imagegen_to_discord.py \
   --prompt "<image prompt>" --out "$OUT"
+
+**Aspect ratio / size**:
+
+- You can force size with `--size 1536x1024` / `--size 1024x1536`.
+- Or pass `--aspect 16:9` / `--aspect 9:16`.
+- If you pass neither, the script will try to infer `ratio/aspect` patterns from `--prompt` (e.g. `ratio 16:9`) and choose a best-effort supported size; otherwise it defaults to `1024x1024`.
 ```
 
 **Bot / OpenClaw** (need `--target`):

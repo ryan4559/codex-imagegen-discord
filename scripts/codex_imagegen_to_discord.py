@@ -36,6 +36,7 @@ import tempfile
 import time
 import urllib.parse
 import urllib.request
+import re
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
 DISCORD_CDN_HOSTS = {"cdn.discordapp.com", "media.discordapp.net"}
@@ -43,6 +44,61 @@ DISCORD_API = "https://discord.com/api/v10"
 CODEX_IMAGES_DIR = os.path.expanduser("~/.codex/generated_images")
 OPENCLAW_IMAGES_DIR = os.path.expanduser("~/.openclaw/media/tool-image-generation")
 EXEC_TIMEOUT = 600  # seconds; imagegen turns are slow, but not infinite
+
+
+# ---------------------------------------------------------------------------
+# Size / aspect helpers
+# ---------------------------------------------------------------------------
+
+_RATIO_RE = re.compile(
+    r"(?i)(?:aspect\s*ratio|aspect|ratio)\s*[:=]?\s*(\d+)\s*[:/]\s*(\d+)"
+)
+
+
+def _normalize_ratio(w: int, h: int) -> tuple[int, int] | None:
+    if w <= 0 or h <= 0:
+        return None
+    # reduce fraction
+    import math
+
+    g = math.gcd(w, h)
+    return (w // g, h // g)
+
+
+def infer_ratio_from_text(text: str | None) -> str | None:
+    if not text:
+        return None
+    m = _RATIO_RE.search(text)
+    if not m:
+        return None
+    w = int(m.group(1))
+    h = int(m.group(2))
+    nh = _normalize_ratio(w, h)
+    if not nh:
+        return None
+    return f"{nh[0]}:{nh[1]}"
+
+
+def choose_size_for_ratio(ratio: str | None) -> str:
+    """Pick a likely-supported size for a desired aspect ratio.
+
+    Codex/$imagegen typically supports a small set of sizes.
+    We bias to:
+      - 1024x1024 (square)
+      - 1536x1024 (landscape)
+      - 1024x1536 (portrait)
+    """
+    if not ratio:
+        return "1024x1024"
+    try:
+        w_s, h_s = ratio.split(":", 1)
+        w = int(w_s)
+        h = int(h_s)
+    except Exception:
+        return "1024x1024"
+    if w == h:
+        return "1024x1024"
+    return "1536x1024" if w > h else "1024x1536"
 
 
 def run(cmd: list[str], timeout: int | None = None) -> subprocess.CompletedProcess:
@@ -332,7 +388,16 @@ def main() -> int:
     ap.add_argument("--out", required=True, help="Output image path. The calling agent decides this; for openclaw transport, point to ~/.openclaw/media/tool-image-generation/<name>.png.")
     ap.add_argument("--target", default=None, help='Discord target, e.g. channel:<id> or user:<id>. Required for bot / openclaw transports; ignored for webhook.')
     ap.add_argument("--message", default="generated image")
-    ap.add_argument("--size", default="1024x1024")
+    ap.add_argument(
+        "--size",
+        default=None,
+        help="Explicit image size like 1024x1024 / 1536x1024 / 1024x1536. If omitted, we try to infer from --aspect or the prompt text; otherwise default to 1024x1024.",
+    )
+    ap.add_argument(
+        "--aspect",
+        default=None,
+        help="Desired aspect ratio like 1:1 / 16:9 / 9:16. If --size is omitted, we choose a best-effort supported size.",
+    )
     ap.add_argument(
         "--transport",
         default="auto",
@@ -349,6 +414,11 @@ def main() -> int:
     ap.add_argument("--image-url", action="append", default=[], help="Discord CDN image URL to download and use as reference (repeatable)")
     ap.add_argument("--use-latest-discord-image", action="store_true", help="Use the most recent image attachment in the target channel (bot or openclaw transport only)")
     args = ap.parse_args()
+
+    # If the caller already pinned an explicit --size, don't also infer ratio
+    # from the prompt text (it can create conflicting instructions).
+    inferred_ratio = args.aspect or (None if args.size else infer_ratio_from_text(args.prompt))
+    chosen_size = args.size or choose_size_for_ratio(inferred_ratio)
 
     transport = resolve_transport(args.transport)
     validate_transport_args(transport, args)
@@ -395,9 +465,11 @@ def main() -> int:
         gen_prompt = (
             f"$imagegen\n"
             f"{mode_line}\n"
-            f"Size: {args.size}.\n"
-            f"Instruction: {args.prompt}\n"
+            f"Size: {chosen_size}.\n"
         )
+        if inferred_ratio:
+            gen_prompt += f"Aspect ratio: {inferred_ratio}.\n"
+        gen_prompt += f"Instruction: {args.prompt}\n"
 
         before = snapshot_image_paths(CODEX_IMAGES_DIR)
         started_at = time.time()
